@@ -184,7 +184,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                 "workflow": [
                     "suno write --genre <g> --theme <t> --out song.txt --json",
                     "edit song.txt: replace every <...> span; keep [Section] tags; repeat the chorus verbatim",
-                    "run data.next_action.argv — renders on the configured default model (v5.5, Suno's latest; ~70 credits)",
+                    "run data.next_action.argv — renders on the configured default model (v5.5, Suno's latest; ~10 credits)",
                     "`generate` and `extend` exit 3 if any <...> placeholder survives (unless --force, which disarms that preflight), so no credits are burned on a scaffold"
                 ],
                 "raw_output": "human mode without --out: the lyric skeleton ONLY on stdout (safe to redirect or paste as a lyrics input); title, style prompt, suno tags and handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
@@ -546,7 +546,7 @@ pub fn run() {
         "models": model_map(),
         "remaster_models": remaster_model_map(),
         "generation_cost": {
-            "v5.5": "~70 credits per call (35 per clip, 2 clips)",
+            "v5.5": "~10 credits per call (5 per clip, 2 clips)",
             "note": "Older models cost less. `lyrics` is free.",
         },
         "features": [

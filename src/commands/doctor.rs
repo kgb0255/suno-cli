@@ -236,7 +236,7 @@ async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState, chrome_avail
                 checks.push(DoctorCheck::pass(
                     "credits",
                     format!(
-                        "{} left (v5.5 generation ≈ 70 per call; `lyrics` is free)",
+                        "{} left (v5.5 generation ≈ 10 per call; `lyrics` is free)",
                         info.total_credits_left
                     ),
                 ));

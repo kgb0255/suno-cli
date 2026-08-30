@@ -11,7 +11,7 @@ Which creation command:
 Tips:
   • First run: `suno auth --login`, then `suno doctor` to verify the setup
   • Output is a JSON envelope automatically when piped; force with --json
-  • `suno write` and `suno lyrics` are free; generation costs ~70 credits per call on v5.5
+  • `suno write` and `suno lyrics` are free; generation costs ~10 credits per call on v5.5
   • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
   • Config: `suno config path` shows the file; SUNO_* env vars override it
   • Full machine-readable manifest: `suno agent-info | jq`

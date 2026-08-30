@@ -107,7 +107,7 @@ suno generate \
 suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
 ```
 
-Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call — measured live). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
+Generation costs ~10 credits per call on v5.5 (5 per clip, 2 clips per call — measured against `suno credits` before and after a call on 2026-08-30). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
 
 ## Write a song
 
@@ -349,7 +349,7 @@ Files use slug format: `title-slug-clipid8.mp3` — no overwrites when Suno gene
 
 | Version | Codename | Default | Notes |
 |---|---|---|---|
-| **v5.5** | chirp-fenix | Yes | Latest, best quality — ≈70 credits per call (35/clip) |
+| **v5.5** | chirp-fenix | Yes | Latest, best quality — ≈10 credits per call (5/clip) |
 | v5 | chirp-crow | | Previous generation |
 | v4.5+ | chirp-bluejay | | Extended capabilities |
 | v4.5-all | chirp-auk-turbo | | "Best free model" per Suno — cheapest generation |

@@ -107,14 +107,20 @@ fn models_map_matches_model_flag_values() {
 }
 
 #[test]
-fn generation_cost_documented_as_70() {
-    // Measured live 2026-07-18: one default v5.5 call = 70 credits
-    // (35/clip, 2 clips) — the old ~10 figure burned agents' budgets.
+fn generation_cost_documented_as_10() {
+    // Measured live 2026-08-30 on a Premier plan: two consecutive default
+    // v5.5 calls cost exactly 10 credits each (5/clip, 2 clips), read from
+    // `suno credits` before and after each call — 8770 -> 8760 -> 8750.
+    //
+    // This contradicts a 2026-07-18 note claiming 70/call, which is what the
+    // figure was changed to. Only one of the two can describe a given
+    // account, so if an agent's budget math goes wrong here, re-measure
+    // rather than trusting either number: the cost may well vary by plan.
     let info = agent_info();
     let cost = serde_json::to_string(&info["generation_cost"]).unwrap();
     assert!(
-        cost.contains("70"),
-        "generation_cost must state ~70 credits"
+        cost.contains("10"),
+        "generation_cost must state ~10 credits"
     );
 }
 
