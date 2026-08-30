@@ -30,6 +30,9 @@ base64 = "0.22"
 futures-util = "0.3"
 id3 = "1"
 rookie = "0.5"
+# rookie only ever opens one browser profile; auth::chromium_cookie_dbs
+# expands its glob patterns itself so every profile gets tried.
+glob = "0.3"
 uuid = { version = "1", features = ["v4"] }
 # archive-zip + zip-deflate: release.yml ships a .zip on Windows; self_update
 # returns ArchiveNotEnabled("zip") without them.

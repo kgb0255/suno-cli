@@ -3601,6 +3601,7 @@ dependencies = [
  "directories",
  "figment",
  "futures-util",
+ "glob",
  "id3",
  "indicatif 0.17.11",
  "jsonschema",

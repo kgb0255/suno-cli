@@ -3,7 +3,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::CliError;
@@ -232,63 +232,247 @@ pub fn browser_token() -> String {
     format!(r#"{{"token":"{encoded}"}}"#)
 }
 
-/// Extract Suno auth cookies from the user's browsers.
-/// Tries Chrome, Firefox, Safari, Arc, Brave, Edge in order.
-pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
-    let domains = vec![
-        "suno.com".into(),
-        "auth.suno.com".into(),
-        ".suno.com".into(),
-    ];
+/// Chromium-family browsers we scan, in preference order, as
+/// (rookie config key, display name). Every key must exist in rookie's
+/// per-platform config table — `get_browser_config` unwraps internally, so an
+/// unknown key panics rather than returning an error.
+const CHROMIUM_BROWSERS: &[(&str, &str)] = &[
+    ("chrome", "Chrome"),
+    ("arc", "Arc"),
+    ("brave", "Brave"),
+    ("edge", "Edge"),
+    ("chromium", "Chromium"),
+    ("vivaldi", "Vivaldi"),
+    ("opera", "Opera"),
+];
 
-    for (name, result) in [
-        ("Chrome", rookie::chrome(Some(domains.clone()))),
-        ("Arc", rookie::arc(Some(domains.clone()))),
-        ("Brave", rookie::brave(Some(domains.clone()))),
-        ("Firefox", rookie::firefox(Some(domains.clone()))),
-        ("Edge", rookie::edge(Some(domains.clone()))),
-    ] {
-        if let Ok(cookies) = result {
-            let mut seen = HashSet::new();
-            let mut header_parts = Vec::new();
-            let mut clerk_client_cookie: Option<String> = None;
-            let mut auth_domain_clerk: Option<String> = None;
-            let mut device_id: Option<String> = None;
+#[cfg(unix)]
+fn expand_browser_path(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) => path.replace("$HOME", &home).replace('~', &home),
+        Err(_) => path.to_string(),
+    }
+}
 
-            for cookie in cookies {
-                if !cookie.domain.contains("suno.com") {
-                    continue;
+#[cfg(windows)]
+fn expand_browser_path(path: &str) -> String {
+    // Expand %VAR% the way rookie does, leaving unset names untouched.
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(value) => out.push_str(&value),
+                    Err(_) => out.push_str(&format!("%{name}%")),
                 }
-                if cookie.name == "__client" && !cookie.value.is_empty() {
-                    if cookie.domain.contains("auth.suno.com") {
-                        auth_domain_clerk = Some(cookie.value.clone());
-                    } else if clerk_client_cookie.is_none() {
-                        clerk_client_cookie = Some(cookie.value.clone());
-                    }
-                }
-                if cookie.name == "ajs_anonymous_id" && device_id.is_none() {
-                    device_id = sanitize_device_id(&cookie.value);
-                }
-                let key = (cookie.name.clone(), cookie.domain.clone());
-                if seen.insert(key) {
-                    header_parts.push(format!("{}={}", cookie.name, cookie.value));
-                }
+                rest = &after[end + 1..];
             }
+            None => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
 
-            if let Some(clerk_client_cookie) = auth_domain_clerk.or(clerk_client_cookie) {
-                eprintln!("Found Suno session in {name}");
-                return Ok(BrowserAuth {
-                    clerk_client_cookie,
-                    cookie_header: header_parts.join("; "),
-                    device_id,
-                });
+/// Human-readable profile name for a cookie DB path.
+/// `.../Profile 7/Cookies` and `.../Profile 7/Network/Cookies` both give
+/// "Profile 7".
+fn profile_label(db: &Path) -> String {
+    let mut dir = db.parent();
+    if dir.and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("Network")) {
+        dir = dir.and_then(|p| p.parent());
+    }
+    dir.and_then(|p| p.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| db.display().to_string())
+}
+
+/// Every cookie DB rookie knows about for `browser`, most recently written
+/// first.
+///
+/// rookie's own `chrome()` helper returns the *first* profile its glob matches
+/// and stops there. On a Chrome install whose profiles are `Profile 5`..
+/// `Profile 9` with no `Default`, that is `Profile 5` — a session living in
+/// `Profile 7` is invisible, and the user just sees "no session found" after
+/// unlocking their keychain. Expanding every match and trying them all is the
+/// only way to reach a non-default profile.
+fn chromium_cookie_dbs(browser: &str) -> Vec<PathBuf> {
+    let config = rookie::config::get_browser_config(browser);
+    let channels = config
+        .channels
+        .clone()
+        .unwrap_or_else(|| vec![String::new()]);
+
+    let mut dbs: Vec<PathBuf> = Vec::new();
+    for pattern in &config.paths {
+        for channel in &channels {
+            let expanded = expand_browser_path(&pattern.replace("{channel}", channel));
+            let Ok(matches) = glob::glob(&expanded) else {
+                continue;
+            };
+            for db in matches.flatten() {
+                if db.is_file() && !dbs.contains(&db) {
+                    dbs.push(db);
+                }
             }
         }
     }
 
-    Err(CliError::Config(
-        "No Suno session found in any browser. Log into suno.com first, then retry.".into(),
-    ))
+    // Newest first: when several profiles hold a __client, the one the user
+    // actually browses Suno in is the one that was written most recently.
+    dbs.sort_by_key(|db| {
+        std::cmp::Reverse(
+            std::fs::metadata(db)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(UNIX_EPOCH),
+        )
+    });
+    dbs
+}
+
+/// The `Local State` file holding the DPAPI-wrapped key, relative to a
+/// Windows cookie DB.
+#[cfg(windows)]
+fn chromium_key_path(db: &Path) -> Option<PathBuf> {
+    let parent = db.parent()?;
+    ["../../Local State", "../Local State", "Local State"]
+        .iter()
+        .map(|candidate| parent.join(candidate))
+        .find(|candidate| candidate.exists())
+}
+
+fn read_chromium_cookies(
+    browser: &str,
+    db: &Path,
+    domains: &[String],
+) -> Result<Vec<rookie::enums::Cookie>, String> {
+    #[cfg(windows)]
+    {
+        let _ = browser;
+        let key = chromium_key_path(db)
+            .ok_or_else(|| "no Local State file beside the cookie database".to_string())?;
+        rookie::chromium_based(key, db.to_path_buf(), Some(domains.to_vec()))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(unix)]
+    {
+        let config = rookie::config::get_browser_config(browser);
+        rookie::chromium_based(config, db.to_path_buf(), Some(domains.to_vec()))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Pull the Clerk session out of one browser profile's cookie jar.
+/// Returns `None` when the profile has no Suno `__client` cookie.
+fn browser_auth_from_cookies(cookies: Vec<rookie::enums::Cookie>) -> Option<BrowserAuth> {
+    let mut seen = HashSet::new();
+    let mut header_parts = Vec::new();
+    let mut clerk_client_cookie: Option<String> = None;
+    let mut auth_domain_clerk: Option<String> = None;
+    let mut device_id: Option<String> = None;
+
+    for cookie in cookies {
+        if !cookie.domain.contains("suno.com") {
+            continue;
+        }
+        if cookie.name == "__client" && !cookie.value.is_empty() {
+            if cookie.domain.contains("auth.suno.com") {
+                auth_domain_clerk = Some(cookie.value.clone());
+            } else if clerk_client_cookie.is_none() {
+                clerk_client_cookie = Some(cookie.value.clone());
+            }
+        }
+        if cookie.name == "ajs_anonymous_id" && device_id.is_none() {
+            device_id = sanitize_device_id(&cookie.value);
+        }
+        let key = (cookie.name.clone(), cookie.domain.clone());
+        if seen.insert(key) {
+            header_parts.push(format!("{}={}", cookie.name, cookie.value));
+        }
+    }
+
+    Some(BrowserAuth {
+        clerk_client_cookie: auth_domain_clerk.or(clerk_client_cookie)?,
+        cookie_header: header_parts.join("; "),
+        device_id,
+    })
+}
+
+/// Extract Suno auth cookies from the user's browsers.
+/// Scans every profile of every Chromium-family browser, then Firefox, then
+/// Safari on macOS.
+pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
+    let domains = vec![
+        "suno.com".to_string(),
+        "auth.suno.com".to_string(),
+        ".suno.com".to_string(),
+    ];
+
+    // Profiles we opened but that held no Suno session, and profiles we could
+    // not read at all. Both go into the failure message: a silent
+    // "no session found" is the single most confusing way this can fail.
+    let mut scanned: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for (key, name) in CHROMIUM_BROWSERS {
+        for db in chromium_cookie_dbs(key) {
+            let profile = profile_label(&db);
+            match read_chromium_cookies(key, &db, &domains) {
+                Ok(cookies) => match browser_auth_from_cookies(cookies) {
+                    Some(auth) => {
+                        eprintln!("Found Suno session in {name} ({profile})");
+                        return Ok(auth);
+                    }
+                    None => scanned.push(format!("{name} ({profile})")),
+                },
+                Err(e) => failures.push(format!("{name} ({profile}): {e}")),
+            }
+        }
+    }
+
+    // Firefox and Safari keep one store per install rather than per profile
+    // directory, so rookie's own lookup is enough.
+    let mut others: Vec<(&str, rookie::Result<Vec<rookie::enums::Cookie>>)> =
+        vec![("Firefox", rookie::firefox(Some(domains.clone())))];
+    #[cfg(target_os = "macos")]
+    others.push(("Safari", rookie::safari(Some(domains.clone()))));
+
+    for (name, result) in others {
+        match result {
+            Ok(cookies) => match browser_auth_from_cookies(cookies) {
+                Some(auth) => {
+                    eprintln!("Found Suno session in {name}");
+                    return Ok(auth);
+                }
+                None => scanned.push(name.to_string()),
+            },
+            Err(e) => failures.push(format!("{name}: {e}")),
+        }
+    }
+
+    let mut message =
+        String::from("No Suno session found in any browser. Log into suno.com first, then retry.");
+    if !scanned.is_empty() {
+        message.push_str(&format!(
+            "\n  Scanned, no Suno cookies: {}",
+            scanned.join(", ")
+        ));
+    }
+    if !failures.is_empty() {
+        message.push_str(&format!("\n  Could not read: {}", failures.join("; ")));
+    }
+    message.push_str(
+        "\n  Manual fallback: copy the Cookie header from suno.com in DevTools, \
+         then run `suno auth --cookie '<cookie header>'`",
+    );
+    Err(CliError::Config(message))
 }
 
 /// Exchange the __client cookie for a session ID and JWT via Clerk.
