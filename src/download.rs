@@ -6,13 +6,67 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use id3::TagLike;
 
+use crate::api::SunoClient;
 use crate::api::types::{AlignedWord, Clip};
 use crate::errors::CliError;
 
-/// Suno no longer hands out a clip's CDN link in the feed: `audio_url` comes
-/// back as the `/api/forbidden` sentinel, and the signed cdn1 links the web
-/// player uses carry an expiring CloudFront key. A clip's own ID is the only
-/// durable handle on its audio, and this endpoint resolves one to the MP3.
+/// How long to wait for Suno to finish rendering an export before giving up.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(180);
+const EXPORT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+#[derive(serde::Deserialize)]
+struct ExportResponse {
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Ask Suno to export a clip, returning the URL to fetch it from.
+///
+/// This is the call the web app's Download > MP3 menu item makes, and it is the
+/// only durable route to a clip's audio: the feed no longer hands out a CDN
+/// link (`audio_url` is the `/api/forbidden` sentinel), and what the web player
+/// streams from CloudFront is encrypted and decrypted in the client.
+///
+/// The endpoint is asynchronous. Until the file is rendered it answers
+/// `{"ok": true, "status": "processing"}` with no URL, so poll until one shows
+/// up. What comes back is a presigned S3 link valid for only a few minutes --
+/// fetch it straight away and never cache it.
+async fn resolve_export_url(api: &SunoClient, clip_id: &str) -> Result<String, CliError> {
+    let path = format!("/api/download/clip/{clip_id}?format=mp3");
+    let deadline = std::time::Instant::now() + EXPORT_TIMEOUT;
+    let mut announced = false;
+    loop {
+        let body: ExportResponse = api
+            .with_auth_retry(|| async {
+                let resp = api.get(&path).send().await?;
+                let resp = api.check_response(resp).await?;
+                Ok(resp.json().await?)
+            })
+            .await?;
+
+        if let Some(url) = body.download_url {
+            return Ok(url);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError::Download(format!(
+                "Suno did not finish preparing the export for {clip_id} within {}s (status: {})",
+                EXPORT_TIMEOUT.as_secs(),
+                body.status.as_deref().unwrap_or("unknown"),
+            )));
+        }
+        if !announced {
+            eprintln!("Suno is preparing the export for {clip_id}...");
+            announced = true;
+        }
+        tokio::time::sleep(EXPORT_POLL_INTERVAL).await;
+    }
+}
+
+/// Legacy ID-addressed endpoint. It served plain MP3s until Suno moved to
+/// encrypted delivery and now usually answers 200 with an empty body, so it
+/// sits behind the export endpoint as a last resort rather than being trusted.
 const AUDIO_BY_ID: &str = "https://audiopipe.suno.ai/?item_id=";
 
 /// A feed URL is only usable if it is non-empty and not the sentinel Suno
@@ -28,11 +82,16 @@ fn usable_url(url: Option<&str>) -> Option<&str> {
     }
 }
 
-pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result<String, CliError> {
-    // Try the feed's own link first when it's real — it's the CDN, and faster —
-    // then fall back to the ID-addressed endpoint, which also covers a signed
-    // link that expired between listing and download. Video has no such
-    // fallback, so a missing one is still a hard error.
+pub async fn download_clip(
+    api: &SunoClient,
+    clip: &Clip,
+    output_dir: &str,
+    video: bool,
+) -> Result<String, CliError> {
+    let mut export_err = None;
+    // Audio goes through the export endpoint first, then anything the feed
+    // still offers, then the legacy endpoint. Video has no export route we
+    // have verified, so a missing feed URL stays a hard error.
     let urls: Vec<String> = if video {
         vec![
             usable_url(clip.video_url.as_deref())
@@ -40,11 +99,18 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
                 .to_string(),
         ]
     } else {
-        let by_id = format!("{AUDIO_BY_ID}{}", clip.id);
-        match usable_url(clip.audio_url.as_deref()) {
-            Some(u) => vec![u.to_string(), by_id],
-            None => vec![by_id],
+        let mut candidates = Vec::new();
+        // A failure here is not fatal on its own -- the fallbacks below may
+        // still work -- but it is the most informative error if nothing does.
+        match resolve_export_url(api, &clip.id).await {
+            Ok(u) => candidates.push(u),
+            Err(e) => export_err = Some(e),
         }
+        if let Some(u) = usable_url(clip.audio_url.as_deref()) {
+            candidates.push(u.to_string());
+        }
+        candidates.push(format!("{AUDIO_BY_ID}{}", clip.id));
+        candidates
     };
 
     let ext = if video { "mp4" } else { "mp3" };
@@ -67,36 +133,8 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
         .timeout(Duration::from_secs(600))
         .build()
         .map_err(CliError::Http)?;
-    let mut last_err = None;
-    let mut response = None;
-    for url in &urls {
-        match client
-            .get(url)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
-            Ok(r) => {
-                response = Some(r);
-                break;
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-    // `urls` is never empty, so a `None` response always carries an error.
-    let resp = match (response, last_err) {
-        (Some(r), _) => r,
-        (None, Some(e)) => return Err(CliError::Http(e)),
-        (None, None) => {
-            return Err(CliError::Download(format!(
-                "no audio URL available for {}",
-                clip.id
-            )));
-        }
-    };
 
-    let total = resp.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total);
+    let pb = ProgressBar::new(0);
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} [{bar:40}] {bytes}/{total_bytes} ({eta})")
@@ -105,21 +143,34 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     );
     pb.set_message(filename.clone());
 
-    let written = match stream_to_file(&part_path, resp, &pb).await {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&part_path).await;
-            return Err(e);
+    // Walk the candidates, retrying each: the ID-addressed endpoint throttles
+    // by answering 200 with an empty body, which clears on a short wait.
+    let mut last_err = None;
+    let mut downloaded = false;
+    'candidates: for url in &urls {
+        for attempt_no in 1..=ATTEMPTS_PER_URL {
+            match fetch_to_part(&client, url, &part_path, &pb).await {
+                Ok(_) => {
+                    downloaded = true;
+                    break 'candidates;
+                }
+                Err(e) => {
+                    // Every failure path leaves the .part behind; drop it so a
+                    // later attempt starts clean rather than appending.
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    pb.set_position(0);
+                    last_err = Some(e);
+                    if attempt_no < ATTEMPTS_PER_URL {
+                        tokio::time::sleep(Duration::from_secs(2 * attempt_no)).await;
+                    }
+                }
+            }
         }
-    };
-
-    // Reject a short read against the advertised size instead of tagging a
-    // truncated MP3 downstream.
-    if total > 0 && written != total {
-        let _ = tokio::fs::remove_file(&part_path).await;
-        return Err(CliError::Download(format!(
-            "incomplete download: received {written} of {total} bytes for {filename}"
-        )));
+    }
+    if !downloaded {
+        return Err(export_err.or(last_err).unwrap_or_else(|| {
+            CliError::Download(format!("no audio URL available for {}", clip.id))
+        }));
     }
 
     if let Err(e) = tokio::fs::rename(&part_path, &path).await {
@@ -129,6 +180,48 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     pb.finish_with_message("done");
 
     Ok(path.display().to_string())
+}
+
+/// How many times to try each candidate URL before moving to the next.
+const ATTEMPTS_PER_URL: u64 = 3;
+
+/// One attempt at one URL, streaming into `part_path`. The caller removes the
+/// partial file and decides whether to retry.
+///
+/// An empty 200 is a failure, not a success: the ID-addressed endpoint answers
+/// 200 `audio/mp3` with a zero-length body when it throttles, and a zero-byte
+/// file still gets ID3-tagged downstream — which is how a "download" ends up
+/// as a 40-byte file that every player and ffmpeg rejects.
+async fn fetch_to_part(
+    client: &reqwest::Client,
+    url: &str,
+    part_path: &Path,
+    pb: &ProgressBar,
+) -> Result<u64, CliError> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(CliError::Http)?;
+
+    let total = resp.content_length().unwrap_or(0);
+    pb.set_length(total);
+
+    let written = stream_to_file(part_path, resp, pb).await?;
+
+    if written == 0 {
+        return Err(CliError::Download(format!("empty response from {url}")));
+    }
+    // Reject a short read against the advertised size instead of tagging a
+    // truncated MP3 downstream. Absent a content-length there is nothing to
+    // check against, which is why the zero-byte case is caught separately.
+    if total > 0 && written != total {
+        return Err(CliError::Download(format!(
+            "incomplete download: received {written} of {total} bytes from {url}"
+        )));
+    }
+    Ok(written)
 }
 
 /// Stream a response body to `part_path`, returning the byte count written.

@@ -29,7 +29,7 @@ pub struct SunoClient {
     auth: Mutex<AuthState>,
 }
 
-const BASE_URL: &str = "https://studio-api-prod.suno.com";
+pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 impl SunoClient {
     /// Create a new client. If JWT is expired but we have a Clerk cookie,
@@ -94,7 +94,7 @@ impl SunoClient {
             .headers(self.headers())
     }
 
-    fn headers(&self) -> reqwest::header::HeaderMap {
+    pub(crate) fn headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         // Lock briefly, clone the strings we need, drop the guard before
         // touching the header map. Never hold the lock across an await.
