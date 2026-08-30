@@ -180,7 +180,10 @@ pub struct GenerateRequest {
     /// an integer and 422s on a string, and the hCaptcha flow works without it.
     pub token: Option<String>,
     pub generation_type: String,
-    pub title: Option<String>,
+    /// Always present, defaults to "" (empty string, NOT null): Suno's schema
+    /// types this as a required string and 422s on null. `describe` never sets
+    /// a title, so this default is what keeps it working.
+    pub title: String,
     pub tags: Option<String>,
     /// Always present, defaults to "" (empty string, NOT null).
     pub negative_tags: String,
@@ -213,7 +216,7 @@ impl GenerateRequest {
         Self {
             token: None,
             generation_type: "TEXT".to_string(),
-            title: None,
+            title: String::new(),
             tags: None,
             negative_tags: String::new(),
             mv: mv.to_string(),

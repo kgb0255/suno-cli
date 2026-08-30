@@ -504,7 +504,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // task="vox" field no longer exists in the v2-web schema.
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = lyrics.unwrap_or_default();
-            req.title = args.title;
+            req.title = args.title.unwrap_or_default();
             req.tags = tags;
             req.negative_tags = args.exclude.unwrap_or_default();
             req.make_instrumental = args.instrumental;
@@ -555,6 +555,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let mut req = GenerateRequest::new(model.to_api_key(), "inspiration");
             req.prompt = args.prompt;
             req.tags = tags;
+            req.negative_tags = args.exclude.unwrap_or_default();
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;

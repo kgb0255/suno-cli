@@ -392,6 +392,10 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Exclude styles (comma-separated): "metal, heavy"
+    #[arg(long)]
+    pub exclude: Option<String>,
+
     /// Model version (default: config `default_model`, v5.5 out of the box)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
