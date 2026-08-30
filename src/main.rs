@@ -181,11 +181,18 @@ async fn resolve_captcha(
 
 /// Generate, wait, optionally download with lyrics embedding.
 /// Poll timing comes from config (`poll_timeout_secs`, `poll_interval_secs`).
+/// Where a generation's clips should be saved, and in what format. The two
+/// travel together: a directory without a format is only ever half an answer.
+struct DownloadTarget<'a> {
+    dir: &'a str,
+    format: cli::AudioFormat,
+}
+
 async fn handle_generation(
     c: &SunoClient,
     clips: Vec<api::types::Clip>,
     wait: bool,
-    download_dir: Option<&str>,
+    download: Option<DownloadTarget<'_>>,
     fmt: OutputFormat,
     quiet: bool,
     cfg: &config::AppConfig,
@@ -200,12 +207,19 @@ async fn handle_generation(
             .poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
             .await?;
 
-        if let Some(dir) = download_dir {
+        if let Some(DownloadTarget { dir, format }) = download {
             for clip in &final_clips {
                 if clip.status == "complete" {
-                    let path = download::download_clip(c, clip, dir, false).await?;
+                    let path = download::download_clip(c, clip, dir, false, format).await?;
 
-                    // Embed lyrics into MP3
+                    // ID3 frames are an MP3 construct — writing them into a
+                    // WAV would corrupt the RIFF container, so skip it there.
+                    if format != cli::AudioFormat::Mp3 {
+                        if !quiet {
+                            eprintln!("Downloaded: {path}");
+                        }
+                        continue;
+                    }
                     let plain_lyrics = clip.metadata.prompt.as_deref();
                     // Try to get timed lyrics for synced display
                     let aligned = c.aligned_lyrics(&clip.id).await.ok();
@@ -515,7 +529,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 &c,
                 clips,
                 args.wait,
-                args.download.as_deref(),
+                args.download.as_deref().map(|dir| DownloadTarget {
+                    dir,
+                    format: args.format,
+                }),
                 fmt,
                 cli.quiet,
                 &cfg,
@@ -553,7 +570,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 &c,
                 clips,
                 args.wait,
-                args.download.as_deref(),
+                args.download.as_deref().map(|dir| DownloadTarget {
+                    dir,
+                    format: args.format,
+                }),
                 fmt,
                 cli.quiet,
                 &cfg,
@@ -619,7 +639,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 &c,
                 clips,
                 args.wait,
-                args.download.as_deref(),
+                args.download.as_deref().map(|dir| DownloadTarget {
+                    dir,
+                    format: args.format,
+                }),
                 fmt,
                 cli.quiet,
                 &cfg,
@@ -645,7 +668,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 &c,
                 clips,
                 args.wait,
-                args.download.as_deref(),
+                args.download.as_deref().map(|dir| DownloadTarget {
+                    dir,
+                    format: args.format,
+                }),
                 fmt,
                 cli.quiet,
                 &cfg,
@@ -714,8 +740,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 // Download + lyric-embed per clip; one bad clip (still
                 // streaming, deleted mid-batch) must not sink the rest.
                 let result: Result<String, CliError> = async {
-                    let path = download::download_clip(&c, clip, &out_dir, args.video).await?;
-                    if !args.video {
+                    let path = download::download_clip(&c, clip, &out_dir, args.video, args.format)
+                        .await?;
+                    if !args.video && args.format == cli::AudioFormat::Mp3 {
                         let plain_lyrics = clip.metadata.prompt.as_deref();
                         let aligned = c.aligned_lyrics(&clip.id).await.ok();
                         download::embed_lyrics_in_mp3(

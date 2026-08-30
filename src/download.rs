@@ -8,6 +8,7 @@ use id3::TagLike;
 
 use crate::api::SunoClient;
 use crate::api::types::{AlignedWord, Clip};
+use crate::cli::AudioFormat;
 use crate::errors::CliError;
 
 /// How long to wait for Suno to finish rendering an export before giving up.
@@ -33,8 +34,12 @@ struct ExportResponse {
 /// `{"ok": true, "status": "processing"}` with no URL, so poll until one shows
 /// up. What comes back is a presigned S3 link valid for only a few minutes --
 /// fetch it straight away and never cache it.
-async fn resolve_export_url(api: &SunoClient, clip_id: &str) -> Result<String, CliError> {
-    let path = format!("/api/download/clip/{clip_id}?format=mp3");
+async fn resolve_export_url(
+    api: &SunoClient,
+    clip_id: &str,
+    format: AudioFormat,
+) -> Result<String, CliError> {
+    let path = format!("/api/download/clip/{clip_id}?format={}", format.as_str());
     let deadline = std::time::Instant::now() + EXPORT_TIMEOUT;
     let mut announced = false;
     loop {
@@ -87,6 +92,7 @@ pub async fn download_clip(
     clip: &Clip,
     output_dir: &str,
     video: bool,
+    format: AudioFormat,
 ) -> Result<String, CliError> {
     let mut export_err = None;
     // Audio goes through the export endpoint first, then anything the feed
@@ -102,18 +108,20 @@ pub async fn download_clip(
         let mut candidates = Vec::new();
         // A failure here is not fatal on its own -- the fallbacks below may
         // still work -- but it is the most informative error if nothing does.
-        match resolve_export_url(api, &clip.id).await {
+        match resolve_export_url(api, &clip.id, format).await {
             Ok(u) => candidates.push(u),
             Err(e) => export_err = Some(e),
         }
         if let Some(u) = usable_url(clip.audio_url.as_deref()) {
             candidates.push(u.to_string());
         }
-        candidates.push(format!("{AUDIO_BY_ID}{}", clip.id));
+        if format == AudioFormat::Mp3 {
+            candidates.push(format!("{AUDIO_BY_ID}{}", clip.id));
+        }
         candidates
     };
 
-    let ext = if video { "mp4" } else { "mp3" };
+    let ext = if video { "mp4" } else { format.as_str() };
     let filename = clip_filename(&clip.title, &clip.id, ext);
     // Create the target dir up front: generation has already spent credits by
     // the time we download, so a missing `--download` dir must not error out.

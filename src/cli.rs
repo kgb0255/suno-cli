@@ -364,6 +364,9 @@ pub struct GenerateArgs {
     /// Download output to directory after generation
     #[arg(long)]
     pub download: Option<String>,
+    /// Audio format (ignored with --video)
+    #[arg(long, value_enum, default_value_t = AudioFormat::Mp3)]
+    pub format: AudioFormat,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
@@ -420,6 +423,9 @@ pub struct DescribeArgs {
     /// Download output to directory
     #[arg(long)]
     pub download: Option<String>,
+    /// Audio format (ignored with --video)
+    #[arg(long, value_enum, default_value_t = AudioFormat::Mp3)]
+    pub format: AudioFormat,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
@@ -522,6 +528,9 @@ pub struct CoverArgs {
     /// Download output to directory
     #[arg(long)]
     pub download: Option<String>,
+    /// Audio format (ignored with --video)
+    #[arg(long, value_enum, default_value_t = AudioFormat::Mp3)]
+    pub format: AudioFormat,
 }
 
 #[derive(clap::Args)]
@@ -552,6 +561,9 @@ pub struct RemasterArgs {
     /// Download output to directory
     #[arg(long)]
     pub download: Option<String>,
+    /// Audio format (ignored with --video)
+    #[arg(long, value_enum, default_value_t = AudioFormat::Mp3)]
+    pub format: AudioFormat,
 }
 
 #[derive(clap::Args)]
@@ -607,6 +619,28 @@ pub struct StatusArgs {
     pub ids: Vec<String>,
 }
 
+/// Audio container to ask Suno's export endpoint for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum AudioFormat {
+    /// Lossy, small, and the only format that can carry embedded lyrics.
+    #[default]
+    Mp3,
+    /// Lossless 48kHz PCM. The better source when the audio will be
+    /// normalized, mixed or re-encoded afterwards, and it reports its own
+    /// duration accurately where Suno's MP3s overstate theirs.
+    Wav,
+}
+
+impl AudioFormat {
+    /// Doubles as the file extension and the endpoint's `format` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Wav => "wav",
+        }
+    }
+}
+
 #[derive(clap::Args)]
 pub struct DownloadArgs {
     /// Clip ID(s) to download
@@ -620,6 +654,10 @@ pub struct DownloadArgs {
     /// Download video instead of audio
     #[arg(long)]
     pub video: bool,
+
+    /// Audio format (ignored with --video)
+    #[arg(long, value_enum, default_value_t = AudioFormat::Mp3)]
+    pub format: AudioFormat,
 }
 
 #[derive(clap::Args)]
