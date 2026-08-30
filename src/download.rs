@@ -9,15 +9,42 @@ use id3::TagLike;
 use crate::api::types::{AlignedWord, Clip};
 use crate::errors::CliError;
 
-pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result<String, CliError> {
-    let url = if video {
-        clip.video_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no video URL available".into()))?
+/// Suno no longer hands out a clip's CDN link in the feed: `audio_url` comes
+/// back as the `/api/forbidden` sentinel, and the signed cdn1 links the web
+/// player uses carry an expiring CloudFront key. A clip's own ID is the only
+/// durable handle on its audio, and this endpoint resolves one to the MP3.
+const AUDIO_BY_ID: &str = "https://audiopipe.suno.ai/?item_id=";
+
+/// A feed URL is only usable if it is non-empty and not the sentinel Suno
+/// substitutes when it won't release the CDN link. Empty strings matter: the
+/// feed sends `""` rather than null, so a bare `Option` check lets one through
+/// and reqwest then fails on a relative URL instead of saying what's wrong.
+fn usable_url(url: Option<&str>) -> Option<&str> {
+    let u = url?.trim();
+    if u.is_empty() || u.ends_with("/api/forbidden") {
+        None
     } else {
-        clip.audio_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no audio URL available".into()))?
+        Some(u)
+    }
+}
+
+pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result<String, CliError> {
+    // Try the feed's own link first when it's real — it's the CDN, and faster —
+    // then fall back to the ID-addressed endpoint, which also covers a signed
+    // link that expired between listing and download. Video has no such
+    // fallback, so a missing one is still a hard error.
+    let urls: Vec<String> = if video {
+        vec![
+            usable_url(clip.video_url.as_deref())
+                .ok_or_else(|| CliError::Download("no video URL available".into()))?
+                .to_string(),
+        ]
+    } else {
+        let by_id = format!("{AUDIO_BY_ID}{}", clip.id);
+        match usable_url(clip.audio_url.as_deref()) {
+            Some(u) => vec![u.to_string(), by_id],
+            None => vec![by_id],
+        }
     };
 
     let ext = if video { "mp4" } else { "mp3" };
@@ -40,13 +67,33 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
         .timeout(Duration::from_secs(600))
         .build()
         .map_err(CliError::Http)?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(CliError::Http)?
-        .error_for_status()
-        .map_err(CliError::Http)?;
+    let mut last_err = None;
+    let mut response = None;
+    for url in &urls {
+        match client
+            .get(url)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => {
+                response = Some(r);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    // `urls` is never empty, so a `None` response always carries an error.
+    let resp = match (response, last_err) {
+        (Some(r), _) => r,
+        (None, Some(e)) => return Err(CliError::Http(e)),
+        (None, None) => {
+            return Err(CliError::Download(format!(
+                "no audio URL available for {}",
+                clip.id
+            )));
+        }
+    };
 
     let total = resp.content_length().unwrap_or(0);
     let pb = ProgressBar::new(total);
@@ -181,6 +228,23 @@ pub fn embed_lyrics_in_mp3(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_and_empty_urls_are_not_usable() {
+        // The sentinel Suno returns instead of the CDN link.
+        assert_eq!(
+            usable_url(Some("https://studio-api.prod.suno.com/api/forbidden")),
+            None
+        );
+        // The feed sends "" for video on audio-only clips.
+        assert_eq!(usable_url(Some("")), None);
+        assert_eq!(usable_url(Some("   ")), None);
+        assert_eq!(usable_url(None), None);
+        assert_eq!(
+            usable_url(Some("https://cdn1.suno.ai/abc.mp3")),
+            Some("https://cdn1.suno.ai/abc.mp3")
+        );
+    }
 
     #[test]
     fn filename_collapses_separator_runs() {
