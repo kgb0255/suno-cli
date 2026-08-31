@@ -723,7 +723,17 @@ fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
     // merge stored auth afterward so a missing Clerk session cookie is
     // backfilled from auth.json — push_cookie dedups by (name, domain), so live
     // cookies keep priority over the stored fallback.
-    add_live_browser_cookies(&mut out, &mut seen);
+    //
+    // Reading them costs a macOS Keychain prompt every solve, because
+    // decrypting Chromium's cookie store needs the "Chrome Safe Storage" key.
+    // The grant is per-binary, so it returns after every rebuild, and a
+    // multi-call batch then stops dead waiting for a dialog. `auth.json`
+    // already holds the Clerk session cookie, so skipping the scan is a
+    // supported trade: no prompt, at the cost of not picking up a session
+    // refreshed in the browser since the last `suno auth --login`.
+    if !env_flag("SUNO_NO_BROWSER_COOKIES") {
+        add_live_browser_cookies(&mut out, &mut seen);
+    }
     merge_stored_auth(auth, &mut out, &mut seen);
     Ok(out)
 }
